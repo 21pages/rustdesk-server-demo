@@ -8,27 +8,36 @@ use std::{
     net::SocketAddr,
     ops::{Deref, DerefMut},
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
-    net::{lookup_host, TcpListener, TcpSocket, ToSocketAddrs},
+    net::{lookup_host, ToSocketAddrs},
 };
+use tokio_kcp::{KcpConfig, KcpListener, KcpNoDelayConfig, KcpStream};
 use tokio_socks::{tcp::Socks5Stream, IntoTargetAddr, ToProxyAddrs};
 use tokio_util::codec::Framed;
 
-pub trait TcpStreamTrait: AsyncRead + AsyncWrite + Unpin {}
-pub struct DynTcpStream(Box<dyn TcpStreamTrait + Send + Sync>);
+lazy_static::lazy_static!(
+    static ref KCP_CONFIG: Arc<KcpConfig> = Arc::new(KcpConfig{
+        nodelay:KcpNoDelayConfig::fastest(),
+        ..Default::default()
+    });
+);
+
+pub trait KcpStreamTrait: AsyncRead + AsyncWrite + Unpin {}
+pub struct DynKcpStream(Box<dyn KcpStreamTrait + Send + Sync>);
 
 pub struct FramedStream(
-    Framed<DynTcpStream, BytesCodec>,
+    Framed<DynKcpStream, BytesCodec>,
     SocketAddr,
     Option<(Key, u64, u64)>,
     u64,
 );
 
 impl Deref for FramedStream {
-    type Target = Framed<DynTcpStream, BytesCodec>;
+    type Target = Framed<DynKcpStream, BytesCodec>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -41,35 +50,18 @@ impl DerefMut for FramedStream {
     }
 }
 
-impl Deref for DynTcpStream {
-    type Target = Box<dyn TcpStreamTrait + Send + Sync>;
+impl Deref for DynKcpStream {
+    type Target = Box<dyn KcpStreamTrait + Send + Sync>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl DerefMut for DynTcpStream {
+impl DerefMut for DynKcpStream {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
-}
-
-fn new_socket(addr: std::net::SocketAddr, reuse: bool) -> Result<TcpSocket, std::io::Error> {
-    let socket = match addr {
-        std::net::SocketAddr::V4(..) => TcpSocket::new_v4()?,
-        std::net::SocketAddr::V6(..) => TcpSocket::new_v6()?,
-    };
-    if reuse {
-        // windows has no reuse_port, but it's reuse_address
-        // almost equals to unix's reuse_port + reuse_address,
-        // though may introduce nondeterministic behavior
-        #[cfg(unix)]
-        socket.set_reuseport(true)?;
-        socket.set_reuseaddr(true)?;
-    }
-    socket.bind(addr)?;
-    Ok(socket)
 }
 
 impl FramedStream {
@@ -78,23 +70,23 @@ impl FramedStream {
         local_addr: T2,
         ms_timeout: u64,
     ) -> ResultType<Self> {
-        for local_addr in lookup_host(&local_addr).await? {
+        for _local_addr in lookup_host(&local_addr).await? {
             for remote_addr in lookup_host(&remote_addr).await? {
                 let stream = super::timeout(
                     ms_timeout,
-                    new_socket(local_addr, true)?.connect(remote_addr),
+                    KcpStream::connect(&*KCP_CONFIG.clone(), remote_addr),
                 )
                 .await??;
-                stream.set_nodelay(true).ok();
-                let addr = stream.local_addr()?;
+                let addr = stream.local_addr().await?;
                 return Ok(Self(
-                    Framed::new(DynTcpStream(Box::new(stream)), BytesCodec::new()),
+                    Framed::new(DynKcpStream(Box::new(stream)), BytesCodec::new()),
                     addr,
                     None,
                     0,
                 ));
             }
         }
+
         bail!("could not resolve to any address");
     }
 
@@ -111,11 +103,11 @@ impl FramedStream {
         T1: IntoTargetAddr<'t>,
         T2: ToSocketAddrs,
     {
-        if let Some(local) = lookup_host(&local).await?.next() {
+        if let Some(_local) = lookup_host(&local).await?.next() {
             if let Some(proxy) = proxy.to_proxy_addrs().next().await {
                 let stream =
-                    super::timeout(ms_timeout, new_socket(local, true)?.connect(proxy?)).await??;
-                stream.set_nodelay(true).ok();
+                    super::timeout(ms_timeout, KcpStream::connect(&*KCP_CONFIG.clone(), proxy?))
+                        .await??;
                 let stream = if username.trim().is_empty() {
                     super::timeout(
                         ms_timeout,
@@ -131,15 +123,16 @@ impl FramedStream {
                     )
                     .await??
                 };
-                let addr = stream.local_addr()?;
+                let addr = stream.local_addr().await?;
                 return Ok(Self(
-                    Framed::new(DynTcpStream(Box::new(stream)), BytesCodec::new()),
+                    Framed::new(DynKcpStream(Box::new(stream)), BytesCodec::new()),
                     addr,
                     None,
                     0,
                 ));
             };
-        };
+        }
+
         bail!("could not resolve to any address");
     }
 
@@ -151,9 +144,9 @@ impl FramedStream {
         self.3 = ms;
     }
 
-    pub fn from(stream: impl TcpStreamTrait + Send + Sync + 'static, addr: SocketAddr) -> Self {
+    pub fn from(stream: impl KcpStreamTrait + Send + Sync + 'static, addr: SocketAddr) -> Self {
         Self(
-            Framed::new(DynTcpStream(Box::new(stream)), BytesCodec::new()),
+            Framed::new(DynKcpStream(Box::new(stream)), BytesCodec::new()),
             addr,
             None,
             0,
@@ -237,24 +230,21 @@ impl FramedStream {
     }
 }
 
-const DEFAULT_BACKLOG: u32 = 128;
-
 #[allow(clippy::never_loop)]
-pub async fn new_listener<T: ToSocketAddrs>(addr: T, reuse: bool) -> ResultType<TcpListener> {
+pub async fn new_listener<T: ToSocketAddrs>(addr: T, reuse: bool) -> ResultType<KcpListener> {
     if !reuse {
-        Ok(TcpListener::bind(addr).await?)
+        Ok(KcpListener::bind(KcpConfig::default(), addr).await?)
     } else {
         for addr in lookup_host(&addr).await? {
-            let socket = new_socket(addr, true)?;
-            return Ok(socket.listen(DEFAULT_BACKLOG)?);
+            return Ok(KcpListener::bind(KcpConfig::default(), addr).await?);
         }
         bail!("could not resolve to any address");
     }
 }
 
-impl Unpin for DynTcpStream {}
+impl Unpin for DynKcpStream {}
 
-impl AsyncRead for DynTcpStream {
+impl AsyncRead for DynKcpStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -264,7 +254,7 @@ impl AsyncRead for DynTcpStream {
     }
 }
 
-impl AsyncWrite for DynTcpStream {
+impl AsyncWrite for DynKcpStream {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -281,5 +271,4 @@ impl AsyncWrite for DynTcpStream {
         AsyncWrite::poll_shutdown(Pin::new(&mut self.0), cx)
     }
 }
-
-impl<R: AsyncRead + AsyncWrite + Unpin> TcpStreamTrait for R {}
+impl<R: AsyncRead + AsyncWrite + Unpin> KcpStreamTrait for R {}

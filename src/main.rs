@@ -1,27 +1,30 @@
 use hbb_common::{
-    bytes::BytesMut,
-    protobuf::Message as _,
-    rendezvous_proto::*,
-    tcp::{new_listener, FramedStream},
-    tokio,
-    udp::FramedSocket,
+    bytes::BytesMut, new_listener, protobuf::Message as _, rendezvous_proto::*, tokio,
+    udp::FramedSocket, Stream,
 };
 
-#[tokio::main(basic_scheduler)]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let mut socket = FramedSocket::new("0.0.0.0:21116").await.unwrap();
-    let mut listener = new_listener("0.0.0.0:21116", false).await.unwrap();
-    let mut rlistener = new_listener("0.0.0.0:21117", false).await.unwrap();
+    // if cfg!(feature = "kcp") {
+    let mut socket = FramedSocket::new("0.0.0.0:22210").await.unwrap();
+    let mut listener = new_listener("0.0.0.0:22211", false).await.unwrap();
+    let mut rlistener = new_listener("0.0.0.0:22212", false).await.unwrap();
+    // } else {
+    //     let mut socket = FramedSocket::new("0.0.0.0:21116").await.unwrap();
+    //     let listener = new_listener("0.0.0.0:21116", false).await.unwrap();
+    //     let rlistener = new_listener("0.0.0.0:21117", false).await.unwrap();
+    // }
+
     let mut id_map = std::collections::HashMap::new();
     let relay_server = std::env::var("IP").unwrap();
     let mut saved_stream = None;
     loop {
         tokio::select! {
             Some(Ok((bytes, addr))) = socket.next() => {
-                handle_udp(&mut socket, bytes, addr, &mut id_map).await;
+                handle_udp(&mut socket, bytes, addr.into(), &mut id_map).await;
             }
             Ok((stream, addr)) = listener.accept() => {
-                let mut stream = FramedStream::from(stream);
+                let mut stream = Stream::from(stream, addr);
                 if let Some(Ok(bytes)) = stream.next_timeout(3000).await {
                     if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
                         match msg_in.union {
@@ -47,10 +50,10 @@ async fn main() {
                                 if let Some(mut stream) = saved_stream.take() {
                                     stream.send(&msg_out).await.ok();
                                     if let Ok((stream_a, _)) = rlistener.accept().await {
-                                        let mut stream_a = FramedStream::from(stream_a);
+                                        let mut stream_a = Stream::from(stream_a, addr);
                                         stream_a.next_timeout(3_000).await;
                                         if let Ok((stream_b, _)) = rlistener.accept().await {
-                                            let mut stream_b = FramedStream::from(stream_b);
+                                            let mut stream_b = Stream::from(stream_b, addr);
                                             stream_b.next_timeout(3_000).await;
                                             relay(stream_a, stream_b, &mut socket, &mut id_map).await;
                                         }
@@ -67,8 +70,8 @@ async fn main() {
 }
 
 async fn relay(
-    stream: FramedStream,
-    peer: FramedStream,
+    stream: Stream,
+    peer: Stream,
     socket: &mut FramedSocket,
     id_map: &mut std::collections::HashMap<String, std::net::SocketAddr>,
 ) {
@@ -79,7 +82,7 @@ async fn relay(
     loop {
         tokio::select! {
             Some(Ok((bytes, addr))) = socket.next() => {
-                handle_udp(socket, bytes, addr, id_map).await;
+                handle_udp(socket, bytes, addr.into(), id_map).await;
             }
             res = peer.next() => {
                 if let Some(Ok(bytes)) = res {

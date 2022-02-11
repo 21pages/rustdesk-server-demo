@@ -6,7 +6,6 @@ pub mod rendezvous_proto;
 pub use bytes;
 pub use futures;
 pub use protobuf;
-use socket2::{Domain, Socket, Type};
 use std::{
     fs::File,
     io::{self, BufRead},
@@ -16,6 +15,8 @@ use std::{
 };
 pub use tokio;
 pub use tokio_util;
+// #[cfg(feature = "kcp")]
+pub mod kcp;
 pub mod tcp;
 pub mod udp;
 pub use env_logger;
@@ -29,14 +30,21 @@ pub mod config;
 pub mod fs;
 pub use sodiumoxide;
 
-#[cfg(feature = "quic")]
-pub type Stream = quic::Connection;
-#[cfg(not(feature = "quic"))]
-pub type Stream = tcp::FramedStream;
+// #[cfg(feature = "quic")]
+// pub type Stream = quic::Connection;
+// #[cfg(feature = "kcp")]
+pub type Stream = kcp::FramedStream;
+// #[cfg(not(any(feature = "quic", feature = "kcp")))]
+// pub type Stream = tcp::FramedStream;
+
+// #[cfg(feature = "kcp")]
+pub use crate::kcp::new_listener;
+// #[cfg(not(feature = "kcp"))]
+// pub use crate::tcp::new_listener;
 
 #[inline]
 pub async fn sleep(sec: f32) {
-    tokio::time::delay_for(time::Duration::from_secs_f32(sec)).await;
+    tokio::time::sleep(time::Duration::from_secs_f32(sec)).await;
 }
 
 #[macro_export]
@@ -59,30 +67,6 @@ macro_rules! allow_err {
 #[inline]
 pub fn timeout<T: std::future::Future>(ms: u64, future: T) -> tokio::time::Timeout<T> {
     tokio::time::timeout(std::time::Duration::from_millis(ms), future)
-}
-
-fn new_socket(addr: SocketAddr, tcp: bool, reuse: bool) -> Result<Socket, std::io::Error> {
-    let stype = {
-        if tcp {
-            Type::stream()
-        } else {
-            Type::dgram()
-        }
-    };
-    let socket = match addr {
-        SocketAddr::V4(..) => Socket::new(Domain::ipv4(), stype, None),
-        SocketAddr::V6(..) => Socket::new(Domain::ipv6(), stype, None),
-    }?;
-    if reuse {
-        // windows has no reuse_port, but it's reuse_address
-        // almost equals to unix's reuse_port + reuse_address,
-        // though may introduce nondeterministic bahavior
-        #[cfg(unix)]
-        socket.set_reuse_port(true)?;
-        socket.set_reuse_address(true)?;
-    }
-    socket.bind(&addr.into())?;
-    Ok(socket)
 }
 
 pub type ResultType<F, E = anyhow::Error> = anyhow::Result<F, E>;

@@ -8,10 +8,10 @@ edition = "2018"
 
 [dependencies]
 protobuf = { version = "3.0.0-alpha.2" }
-tokio = { version = "0.2", features = ["full"] }
-tokio-util = { version = "0.3", features = ["full"] }
+tokio = { version = "1.15", features = ["full"] }
+tokio-util = { version = "0.6", features = ["full"] }
 futures = "0.3"
-bytes = "0.5"
+bytes = "1.1"
 log = "0.4"
 env_logger = "0.8"
 socket2 = { version = "0.3", features = ["reuseport"] }
@@ -28,12 +28,18 @@ confy = { git = "https://github.com/open-trade/confy" }
 dirs-next = "2.0"
 filetime = "0.2"
 sodiumoxide = "0.2"
+tokio-socks = { git = "https://github.com/open-trade/tokio-socks" }
+#kcp = {version = "0.4", optional = true }
+kcp = "0.4"
+#tokio_kcp = { git = "https://github.com/21pages/tokio_kcp", branch = "expose", optional = true }
+tokio_kcp = { git = "https://github.com/21pages/tokio_kcp", branch = "expose" }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 mac_address = "1.1"
 
 [features]
 quic = ["quinn"]
+#kcp = ["kcp", "tokio_kcp"]
 
 [build-dependencies]
 protobuf-codegen-pure = { version = "3.0.0-alpha.2" }
