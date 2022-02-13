@@ -2,16 +2,16 @@ use hbb_common::{
     bytes::BytesMut,
     protobuf::Message as _,
     rendezvous_proto::*,
-    tcp::{new_listener, FramedStream},
+    kcp::{new_listener, FramedStream},
     tokio,
     udp::FramedSocket,
 };
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let mut socket = FramedSocket::new("0.0.0.0:21116").await.unwrap();
-    let listener = new_listener("0.0.0.0:21116", false).await.unwrap();
-    let rlistener = new_listener("0.0.0.0:21117", false).await.unwrap();
+    let mut socket = FramedSocket::new("0.0.0.0:22212").await.unwrap();
+    let mut listener = new_listener("0.0.0.0:22213", false).await.unwrap();
+    let mut rlistener = new_listener("0.0.0.0:22214", false).await.unwrap();
     let mut id_map = std::collections::HashMap::new();
     let relay_server = std::env::var("IP").unwrap();
     let mut saved_stream = None;
