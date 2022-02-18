@@ -8,55 +8,21 @@ use hbb_common::{
     AddrMangle,
 };
 
-/*
-打洞思想
-1. udp: 两个分别注册自己的socketaddr, id
-    rendezvous_mediator.rs start()
-        timer.tick()
-            allow_err!(rz.register_peer(&mut socket).await);
-2. 点击'连接', tcp连过来,ip不变端口变, punch request, 带着对方的id和自己的nat类型
-    client.rs _start()
-        let rendezvous_server = crate::get_rendezvous_server(1_000).await;
-        set_punch_hole_request && send to rendezvous_server
-            收到服务器发送的PunchHoleResponse,带着被连接方的公网ip
-            同时向被请求方发送udp信息, 里面带着请求方的公网ip
-
-
-原中继转发思想
-1. udp: 两个分别注册自己的socketaddr, id
-    rendezvous_mediator.rs start()
-        timer.tick()
-            allow_err!(rz.register_peer(&mut socket).await);
-2. 点击'连接', 第一个tcp连过来,ip不变端口变, punch request, 带着对方的id和自己的nat类型
-    client.rs _start()
-        let rendezvous_server = crate::get_rendezvous_server(1_000).await;
-        set_punch_hole_request && send to rendezvous_server
-            收到服务器发送的relay_response,里面带着第二个tcp的ip(port)
-                create_relay, 连接这个ip, 并发送消息
-
-3. 用udp给被请求方地址发RequestRelay, 带着服务器的地址信息, 保留请求的tcpsocket
-4. 被请求方收到RequestRelay, 返回relay_response, 然后给请求方发送RelayResponse, 带着服务器地址
-    rendezvous_mediator.rs start() select!
-        收到request_relay,handle_request_relay, 连接到第一个tcp端口发送, 一个relay_response
-            create_relay_connection
-
-
-5. 用relay服务器的地址, 接受两个连接, 这两个连接间互相转发数据,此时,udp用于处理定时的注册服务
-
-*/
-
 #[tokio::main(basic_scheduler)]
 async fn main() {
     let mut socket = FramedSocket::new("0.0.0.0:21116").await.unwrap();
     let mut listener = new_listener("0.0.0.0:21116", false).await.unwrap();
     //保存
-    let mut id_map = std::collections::HashMap::<String, (std::net::SocketAddr, Vec<u8>)>::new();
+    //<self_id, (self_addr, pk)>
+    let mut udp_map = std::collections::HashMap::<String, (std::net::SocketAddr, Vec<u8>)>::new();
+    //<peer_id, (self_addr stream)>
+    let mut tcp_map = std::collections::HashMap::<String, (std::net::SocketAddr, FramedStream)>::new();
     let relay_server = std::env::var("IP").unwrap();
     loop {
         tokio::select! {
             Some(Ok((bytes, addr))) = socket.next() => {
                 println!("new udp socket from addr:{:?}", addr);
-                handle_udp(&mut socket, bytes, addr, &mut id_map).await;
+                handle_udp(&mut socket, bytes, addr, &mut udp_map).await;
             }
             Ok((stream, addr)) = listener.accept() => { //A tcp addr
                 println!("tcp listener accept new from addr:{:?}", addr);
@@ -66,31 +32,7 @@ async fn main() {
                         match msg_in.union {
                             Some(rendezvous_message::Union::punch_hole_request(ph)) => {
                                 println!("punch_hole_request {:?}, ph:{:?}", addr, ph);
-                                if let Some((peer_addr, pk)) = id_map.get(&ph.id) { //B udp addr
-                                    //给A回 tcp punch response
-                                    // let mut msg_tcp = RendezvousMessage::new();
-                                    // let send_ph = PunchHoleResponse {
-                                    //     socket_addr: AddrMangle::encode(peer_addr.clone()), //B udp addr
-                                    //     pk: pk.clone(),
-                                    //     relay_server:relay_server.clone(),
-                                    //     ..Default::default()
-                                    // };
-                                    // msg_tcp.set_punch_hole_response(send_ph.clone());
-                                    // let ret = stream.send(&msg_tcp).await.ok();
-                                    // println!("send A {:?} PunchHoleResponse:{:?}, ret:{:?}", addr, send_ph, ret);
-
-                                    //给A发 udp punch request
-                                    // let mut msg_udp = RendezvousMessage::new();
-                                    // let send_ph = PunchHole {
-                                    //     socket_addr: AddrMangle::encode(addr.clone()), // A tcp addr
-                                    //      relay_server:relay_server.clone(),
-                                    //      nat_type: ph.nat_type.clone(),
-                                    //      ..Default::default()
-                                    //     };
-                                    // msg_udp.set_punch_hole(send_ph.clone());
-                                    // let ret = socket.send(&msg_udp, peer_addr.clone()).await.ok();
-                                    // println!("send A {:?} PunchHole:{:?}, ret:{:?}", peer_addr, send_ph, ret);
-
+                                if let Some((peer_addr, pk)) = udp_map.get(&ph.id) { //B udp addr
                                     //给B发 udp punch request
                                     let mut msg_udp = RendezvousMessage::new();
                                     let send_ph = PunchHole {
@@ -102,7 +44,29 @@ async fn main() {
                                     msg_udp.set_punch_hole(send_ph.clone());
                                     let ret = socket.send(&msg_udp, peer_addr.clone()).await.ok();
                                     println!("send B {:?} PunchHole:{:?}, ret:{:?}", peer_addr, send_ph, ret);
+
+                                    tcp_map.insert(ph.id, (addr.clone(), stream));                                }
+                            }
+                            Some(rendezvous_message::Union::punch_hole_sent(phs)) => {
+                                println!("recv punch_hole_sent {:?} from {:?}", phs, addr);
+                                if let Some((_, stream)) = tcp_map.get_mut(&phs.id) {
+                                    //给A回 tcp punch response
+                                    if let Some((_, pk)) =  udp_map.get(&phs.id) {
+                                        let mut msg_tcp = RendezvousMessage::new();
+                                        let send_ph = PunchHoleResponse {
+                                            socket_addr: AddrMangle::encode(addr.clone()), //B tcp addr
+                                            pk: pk.clone(),
+                                            relay_server:relay_server.clone(),
+                                            ..Default::default()
+                                        };
+                                        msg_tcp.set_punch_hole_response(send_ph.clone());
+                                            let ret = stream.send(&msg_tcp).await.ok();
+                                            println!("send A {:?} PunchHoleResponse:{:?}, ret:{:?}", addr, send_ph, ret);
+                                    }
+                                } else {
+
                                 }
+
                             }
                             _ => {
                                 println!("other rz {:?}", msg_in);
