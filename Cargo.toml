@@ -7,4 +7,6 @@ description = "A remote control software."
 
 [dependencies]
 hbb_common = { path = "libs/hbb_common" }
+log = "0.4"
+env_logger = "0.9"
 
