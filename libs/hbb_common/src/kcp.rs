@@ -15,15 +15,12 @@ use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     net::{lookup_host, ToSocketAddrs},
 };
-use tokio_kcp::{KcpConfig, KcpListener, KcpNoDelayConfig, KcpStream};
+use tokio_kcp::{KcpConfig, KcpListener, KcpStream};
 use tokio_socks::{tcp::Socks5Stream, IntoTargetAddr, ToProxyAddrs};
 use tokio_util::codec::Framed;
 
 lazy_static::lazy_static!(
-    static ref KCP_CONFIG: Arc<KcpConfig> = Arc::new(KcpConfig{
-        nodelay:KcpNoDelayConfig::fastest(),
-        ..Default::default()
-    });
+    static ref KCP_CONFIG: Arc<KcpConfig> = Arc::new(KcpConfig::default());
 );
 
 pub trait KcpStreamTrait: AsyncRead + AsyncWrite + Unpin {}
@@ -70,11 +67,11 @@ impl FramedStream {
         local_addr: T2,
         ms_timeout: u64,
     ) -> ResultType<Self> {
-        for _local_addr in lookup_host(&local_addr).await? {
+        for local_addr in lookup_host(&local_addr).await? {
             for remote_addr in lookup_host(&remote_addr).await? {
                 let stream = super::timeout(
                     ms_timeout,
-                    KcpStream::connect(&*KCP_CONFIG.clone(), remote_addr),
+                    KcpStream::connect_bind(&*KCP_CONFIG.clone(), local_addr, remote_addr, true),
                 )
                 .await??;
                 let addr = stream.local_addr().await?;
@@ -103,11 +100,13 @@ impl FramedStream {
         T1: IntoTargetAddr<'t>,
         T2: ToSocketAddrs,
     {
-        if let Some(_local) = lookup_host(&local).await?.next() {
+        if let Some(local) = lookup_host(&local).await?.next() {
             if let Some(proxy) = proxy.to_proxy_addrs().next().await {
-                let stream =
-                    super::timeout(ms_timeout, KcpStream::connect(&*KCP_CONFIG.clone(), proxy?))
-                        .await??;
+                let stream = super::timeout(
+                    ms_timeout,
+                    KcpStream::connect_bind(&*KCP_CONFIG.clone(), local, proxy?, true),
+                )
+                .await??;
                 let stream = if username.trim().is_empty() {
                     super::timeout(
                         ms_timeout,
@@ -233,10 +232,10 @@ impl FramedStream {
 #[allow(clippy::never_loop)]
 pub async fn new_listener<T: ToSocketAddrs>(addr: T, reuse: bool) -> ResultType<KcpListener> {
     if !reuse {
-        Ok(KcpListener::bind(KcpConfig::default(), addr).await?)
+        Ok(KcpListener::bind(*KCP_CONFIG.clone(), addr, false).await?)
     } else {
         for addr in lookup_host(&addr).await? {
-            return Ok(KcpListener::bind(KcpConfig::default(), addr).await?);
+            return Ok(KcpListener::bind(*KCP_CONFIG.clone(), addr, true).await?);
         }
         bail!("could not resolve to any address");
     }

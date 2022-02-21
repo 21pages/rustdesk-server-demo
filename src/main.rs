@@ -5,15 +5,16 @@ use hbb_common::{
 
 use log;
 
-#[tokio::main(flavor = "current_thread")]
+//#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() {
     if std::env::var("RUST_LOG").is_err() {
         std::env::set_var("RUST_LOG", "info");
     }
     env_logger::init();
 
-    let mut socket = FramedSocket::new("0.0.0.0:21116").await.unwrap();
-    let mut listener = new_listener("0.0.0.0:21116", false).await.unwrap();
+    let mut socket = FramedSocket::new_reuse("0.0.0.0:21115").await.unwrap();
+    let mut listener = new_listener("0.0.0.0:21116", true).await.unwrap();
     //<self_id, (self_addr, pk)>
     let mut udp_map = std::collections::HashMap::<String, (std::net::SocketAddr, Vec<u8>)>::new();
     //<peer_id, (self_addr stream)>
